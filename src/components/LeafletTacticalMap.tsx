@@ -117,10 +117,11 @@ export default function LeafletTacticalMap({
             const wmsLayer = L.tileLayer.wms(NASA_GIBS_WMS_BASE_URL, {
                 layers: layerConfig.wmsLayerName,
                 format: layerConfig.format,
-                transparent: true,
+                transparent: layerConfig.isTransparent,
                 opacity: nasaOpacity,
                 time: dateStr,
-                maxZoom: 9,
+                maxNativeZoom: 9,
+                maxZoom: 19,
                 zIndex: 200,
                 attribution: "NASA EOSDIS GIBS",
             } as any).addTo(map);
@@ -239,7 +240,7 @@ export default function LeafletTacticalMap({
     return (
         <div className={`relative h-full w-full ${className}`}>
             {/* Tactical Map Basemap & NASA GIBS NRT Satellite Control Bar */}
-            <div className="absolute top-3 left-3 z-[400] flex flex-col gap-1.5 max-w-[95%]">
+            <div className="absolute top-14 left-4 z-[400] flex flex-col gap-1.5 max-w-[95%]">
                 <div className="flex items-center gap-1 bg-black/90 backdrop-blur-md p-1 rounded-lg border border-white/10 shadow-xl overflow-x-auto tactical-scrollbar">
                     {/* Basemap buttons */}
                     <button

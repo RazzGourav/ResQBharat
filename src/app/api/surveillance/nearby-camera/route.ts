@@ -164,51 +164,84 @@ export async function GET(request: NextRequest) {
     const windyKey = process.env.WINDY_WEBCAMS_API_KEY;
     if (windyKey) {
         try {
-            const windyUrl = `https://api.windy.com/webcams/api/v3/webcams?nearby=${targetLat},${targetLng},${radiusKm}&include=player,urls,images`;
-            const res = await fetch(windyUrl, {
+            // First attempt: search within requested radius
+            const windyNearbyUrl = `https://api.windy.com/webcams/api/v3/webcams?nearby=${targetLat},${targetLng},${radiusKm}&include=location,player,urls,images`;
+            const res = await fetch(windyNearbyUrl, {
                 headers: { "x-windy-api-key": windyKey },
                 next: { revalidate: 300 }
             });
+
+            let rawWebcams: any[] = [];
             if (res.ok) {
                 const data = await res.json();
                 if (data.webcams && Array.isArray(data.webcams)) {
-                    for (const w of data.webcams) {
-                        const dist = calculateHaversineDistanceKm(targetLat, targetLng, w.location.latitude, w.location.longitude);
-                        const bearing = calculateCompassBearing(targetLat, targetLng, w.location.latitude, w.location.longitude);
-                        matchedCameras.push({
-                            id: `WINDY-${w.webcamId}`,
-                            title: w.title || "Public Weather/Traffic Webcam",
-                            operator: "Windy Public Webcam Network",
-                            source: "WINDY",
-                            location: {
-                                lat: w.location.latitude,
-                                lng: w.location.longitude,
-                                address: `${w.location.city || ""}, ${w.location.country || ""}`.trim()
-                            },
-                            distance_km: dist,
-                            bearing: bearing,
-                            status: "ACTIVE",
-                            stream_type: w.player?.live ? "HLS" : "IMAGE_SNAPSHOT",
-                            stream_url: w.player?.live || w.images?.current?.preview || "",
-                            preview_image_url: w.images?.current?.preview || "",
-                            is_live: true,
-                            last_updated: w.lastUpdatedOn || "Live"
-                        });
+                    rawWebcams.push(...data.webcams);
+                }
+            }
+
+            // If few or no webcams found in tight radius, fetch regional/country-wide public webcams (India)
+            if (rawWebcams.length < 5) {
+                const countryUrl = `https://api.windy.com/webcams/api/v3/webcams?countries=IN&limit=30&include=location,player,urls,images`;
+                const cRes = await fetch(countryUrl, {
+                    headers: { "x-windy-api-key": windyKey },
+                    next: { revalidate: 300 }
+                });
+                if (cRes.ok) {
+                    const cData = await cRes.json();
+                    if (cData.webcams && Array.isArray(cData.webcams)) {
+                        for (const w of cData.webcams) {
+                            if (!rawWebcams.some(existing => existing.webcamId === w.webcamId)) {
+                                rawWebcams.push(w);
+                            }
+                        }
                     }
                 }
+            }
+
+            // Transform Windy webcams into tactical InterceptedCamera objects
+            for (const w of rawWebcams) {
+                if (!w.location || typeof w.location.latitude !== "number") continue;
+
+                const dist = calculateHaversineDistanceKm(targetLat, targetLng, w.location.latitude, w.location.longitude);
+                const bearing = calculateCompassBearing(targetLat, targetLng, w.location.latitude, w.location.longitude);
+                const embedUrl = w.player?.day || w.player?.lifetime || w.player?.month || "";
+                const previewUrl = w.images?.current?.preview || w.images?.daylight?.preview || "";
+
+                matchedCameras.push({
+                    id: `WINDY-${w.webcamId}`,
+                    title: w.title || "Public Weather/Traffic Webcam",
+                    operator: "Windy Public Webcam Network",
+                    source: "WINDY",
+                    location: {
+                        lat: w.location.latitude,
+                        lng: w.location.longitude,
+                        address: [w.location.city, w.location.region, w.location.country].filter(Boolean).join(", ")
+                    },
+                    distance_km: parseFloat(dist.toFixed(1)),
+                    bearing: bearing,
+                    status: "ACTIVE",
+                    stream_type: embedUrl ? "IFRAME" : "IMAGE_SNAPSHOT",
+                    stream_url: embedUrl || previewUrl,
+                    preview_image_url: previewUrl,
+                    is_live: true,
+                    last_updated: w.lastUpdatedOn ? new Date(w.lastUpdatedOn).toLocaleTimeString() : "Live Feed"
+                });
             }
         } catch (windyErr) {
             console.warn("[CAMERA-INTERCEPTOR] Windy Webcams query failed, using municipal index:", windyErr);
         }
     }
 
-    // Re-sort after adding potential live webcams
-    matchedCameras.sort((a, b) => a.distance_km - b.distance_km);
+    // Deduplicate cameras by id and re-sort by proximity (closest first)
+    const uniqueMap = new Map<string, InterceptedCamera>();
+    for (const c of matchedCameras) {
+        if (!uniqueMap.has(c.id)) uniqueMap.set(c.id, c);
+    }
+    const sortedCameras = Array.from(uniqueMap.values()).sort((a, b) => a.distance_km - b.distance_km);
 
-    // 3. Fallback: If no public camera exists in the radius (e.g. deep rural area),
-    // deploy an Autonomous Aerial Drone Recon feed
+    // 3. Fallback: If no camera exists anywhere in range, deploy Autonomous Drone Recon
     let fallbackCamera: InterceptedCamera | null = null;
-    if (matchedCameras.length === 0) {
+    if (sortedCameras.length === 0) {
         const droneBearing = "NNE";
         fallbackCamera = {
             id: `DRONE-RECON-${incidentId}`,
@@ -236,9 +269,10 @@ export async function GET(request: NextRequest) {
         incident_id: incidentId,
         search_center: { lat: targetLat, lng: targetLng },
         radius_km: radiusKm,
-        total_found: matchedCameras.length,
-        primary_camera: matchedCameras.length > 0 ? matchedCameras[0] : fallbackCamera,
-        nearby_cameras: matchedCameras.length > 0 ? matchedCameras.slice(0, 5) : [fallbackCamera!],
-        mode: matchedCameras.length > 0 ? "LIVE_MUNICIPAL_INTERCEPT" : "AUTONOMOUS_AERIAL_RECON"
+        total_found: sortedCameras.length,
+        has_windy_access: !!windyKey,
+        primary_camera: sortedCameras.length > 0 ? sortedCameras[0] : fallbackCamera,
+        nearby_cameras: sortedCameras.length > 0 ? sortedCameras.slice(0, 20) : [fallbackCamera!],
+        mode: sortedCameras.length > 0 ? "LIVE_MUNICIPAL_INTERCEPT" : "AUTONOMOUS_AERIAL_RECON"
     });
 }

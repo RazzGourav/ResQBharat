@@ -378,8 +378,8 @@ export function TacticalMap({ className }: { className?: string }) {
             {/* --- TACTICAL OVERLAYS --- */}
 
             {/* 1. Header Bar */}
-            <div className="absolute top-4 left-4 right-4 z-[400] flex justify-between items-start pointer-events-none">
-                <div className="glass-panel px-3 py-1.5 rounded-md flex items-center gap-3 pointer-events-auto">
+            <div className="absolute top-3 left-4 right-4 z-[500] flex justify-between items-center pointer-events-none">
+                <div className="glass-panel px-3 py-1.5 rounded-lg flex items-center gap-3 pointer-events-auto border border-zinc-700/60 shadow-2xl bg-zinc-950/90 backdrop-blur-md">
                     <div className="flex items-center gap-2">
                         <span className="relative flex h-2 w-2">
                             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
@@ -389,26 +389,30 @@ export function TacticalMap({ className }: { className?: string }) {
                     </div>
 
                     {/* Map Mode Switcher */}
-                    <div className="flex items-center bg-zinc-900/80 rounded border border-zinc-800 p-0.5 ml-2">
+                    <div className="flex items-center bg-zinc-900/90 rounded-md border border-zinc-800 p-0.5 ml-1">
                         <button
                             onClick={() => setUseLeaflet(false)}
-                            className={`px-2 py-0.5 text-[9px] font-mono font-bold rounded transition-colors ${
+                            className={`px-2.5 py-1 text-[10px] font-mono font-bold rounded transition-all cursor-pointer flex items-center gap-1 ${
                                 !useLeaflet
-                                    ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
-                                    : "text-zinc-500 hover:text-zinc-300"
+                                    ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/50 shadow-[0_0_8px_rgba(16,185,129,0.3)]"
+                                    : "text-zinc-400 hover:text-zinc-200"
                             }`}
+                            title="Switch to Google Maps 3D Vector Engine"
                         >
-                            GOOGLE 3D
+                            <span>🗺️</span>
+                            <span>GOOGLE 3D</span>
                         </button>
                         <button
                             onClick={() => setUseLeaflet(true)}
-                            className={`px-2 py-0.5 text-[9px] font-mono font-bold rounded transition-colors ${
+                            className={`px-2.5 py-1 text-[10px] font-mono font-bold rounded transition-all cursor-pointer flex items-center gap-1 ${
                                 useLeaflet
-                                    ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/40"
-                                    : "text-zinc-500 hover:text-zinc-300"
+                                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-400/50 shadow-[0_0_8px_rgba(6,182,212,0.3)]"
+                                    : "text-zinc-400 hover:text-zinc-200"
                             }`}
+                            title="Switch to Carto OSM & NASA GIBS NRT Satellite Engine"
                         >
-                            TACTICAL OSM
+                            <span>🛰️</span>
+                            <span>CARTO / NASA GIBS</span>
                         </button>
                     </div>
                 </div>

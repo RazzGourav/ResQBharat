@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { type Incident, type InterceptedCamera } from "@/lib/types";
 import { useSimulationStore } from "@/lib/store";
 import { 
@@ -14,7 +14,10 @@ import {
     ShieldAlert, 
     Activity, 
     Layers,
-    ExternalLink
+    ExternalLink,
+    Camera,
+    Play,
+    Globe
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -25,13 +28,19 @@ interface LiveCameraInterceptorProps {
 }
 
 export function LiveCameraInterceptor({ incident, className, onClose }: LiveCameraInterceptorProps) {
-    const { focusedIncidentId, incidents, showNotification } = useSimulationStore();
-    const activeIncident = incident || incidents.find(i => i.id === focusedIncidentId) || incidents[0];
+    const { focusedIncidentId, incidents, activeMapCenter, showNotification } = useSimulationStore();
+    const activeIncident = incident || incidents.find(i => i.id === focusedIncidentId) || (incidents.length > 0 ? incidents[0] : null);
+    const targetLat = activeIncident?.location?.lat || activeMapCenter?.lat || 22.0797;
+    const targetLng = activeIncident?.location?.lng || activeMapCenter?.lng || 82.1409;
+    const incidentId = activeIncident?.id || "REGIONAL-MONITOR";
 
     const [cameras, setCameras] = useState<InterceptedCamera[]>([]);
     const [selectedCamera, setSelectedCamera] = useState<InterceptedCamera | null>(null);
     const [isLoading, setIsLoading] = useState(false);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [activeFilter, setActiveFilter] = useState<"ALL" | "WINDY" | "MUNICIPAL">("ALL");
+    const [windyViewMode, setWindyViewMode] = useState<"PLAYER" | "SNAPSHOT">("PLAYER");
+    const [hasWindyAccess, setHasWindyAccess] = useState<boolean>(true);
     const [analysisResult, setAnalysisResult] = useState<{
         flood?: string;
         damage?: string;
@@ -41,23 +50,23 @@ export function LiveCameraInterceptor({ incident, className, onClose }: LiveCame
 
     const videoRef = useRef<HTMLVideoElement>(null);
 
-    // Fetch nearby cameras whenever the active incident changes
+    // Fetch nearby and regional cameras whenever the active target changes
     useEffect(() => {
-        if (!activeIncident || !activeIncident.location) return;
-
         let isMounted = true;
         const fetchNearbyCameras = async () => {
             setIsLoading(true);
             setAnalysisResult(null);
             try {
                 const res = await fetch(
-                    `/api/surveillance/nearby-camera?lat=${activeIncident.location.lat}&lng=${activeIncident.location.lng}&radius_km=30&incident_id=${activeIncident.id}`
+                    `/api/surveillance/nearby-camera?lat=${targetLat}&lng=${targetLng}&radius_km=30&incident_id=${incidentId}`
                 );
                 if (res.ok) {
                     const data = await res.json();
                     if (isMounted) {
-                        setCameras(data.nearby_cameras || []);
-                        setSelectedCamera(data.primary_camera || null);
+                        const fetchedCams: InterceptedCamera[] = data.nearby_cameras || [];
+                        setCameras(fetchedCams);
+                        setHasWindyAccess(!!data.has_windy_access);
+                        setSelectedCamera(data.primary_camera || (fetchedCams.length > 0 ? fetchedCams[0] : null));
                     }
                 }
             } catch (err) {
@@ -72,23 +81,44 @@ export function LiveCameraInterceptor({ incident, className, onClose }: LiveCame
         return () => {
             isMounted = false;
         };
-    }, [activeIncident?.id, activeIncident?.location?.lat, activeIncident?.location?.lng]);
+    }, [targetLat, targetLng, incidentId]);
+
+    // Counts for filter badges
+    const windyCount = useMemo(() => cameras.filter(c => c.source === "WINDY").length, [cameras]);
+    const municipalCount = useMemo(() => cameras.filter(c => c.source === "MUNICIPAL_CCTV").length, [cameras]);
+
+    const filteredCameras = useMemo(() => {
+        if (activeFilter === "WINDY") return cameras.filter(c => c.source === "WINDY");
+        if (activeFilter === "MUNICIPAL") return cameras.filter(c => c.source === "MUNICIPAL_CCTV");
+        return cameras;
+    }, [cameras, activeFilter]);
 
     // Perform AI analysis on the currently intercepted camera stream
     const handleAnalyzeStream = async () => {
-        if (!activeIncident || !selectedCamera || isAnalyzing) return;
+        if (!selectedCamera || isAnalyzing) return;
         setIsAnalyzing(true);
         showNotification("Dispatching Gemini 3 Vision to scan camera intercept...", "info");
 
         try {
-            // Call the surveillance agent with the camera stream context
             const { analyzeSurveillance } = await import("@/agents/surveillance");
-            const result = await analyzeSurveillance({
-                ...activeIncident,
+            const mockOrActive = {
+                id: activeIncident?.id || selectedCamera.id,
+                title: (activeIncident as any)?.title || activeIncident?.category || selectedCamera.title,
                 type: "VIDEO",
-                raw_input: selectedCamera.stream_url,
-                mission_context: `[LIVE INTERCEPT]: Analyzing feed from ${selectedCamera.title} (${selectedCamera.operator}), located ${selectedCamera.distance_km}km ${selectedCamera.bearing} of incident epicenter.`
-            });
+                priority: activeIncident?.priority || "HIGH",
+                status: activeIncident?.status || "ACTIVE",
+                location: activeIncident?.location || selectedCamera.location,
+                source: "SURVEILLANCE_AGENT",
+                created_at: new Date().toISOString(),
+                description: selectedCamera.title
+            };
+
+            const result = await analyzeSurveillance({
+                ...mockOrActive,
+                type: "VIDEO",
+                raw_input: selectedCamera.preview_image_url || selectedCamera.stream_url,
+                mission_context: `[LIVE INTERCEPT]: Analyzing feed from ${selectedCamera.title} (${selectedCamera.operator}), located ${selectedCamera.distance_km}km ${selectedCamera.bearing} of observation center.`
+            } as any);
 
             setAnalysisResult({
                 flood: result.flood_level || "Assessed",
@@ -106,16 +136,8 @@ export function LiveCameraInterceptor({ incident, className, onClose }: LiveCame
         }
     };
 
-    if (!activeIncident) {
-        return (
-            <div className={cn("glass-panel p-4 rounded-xl flex items-center justify-center text-zinc-500 font-mono text-xs", className)}>
-                NO ACTIVE INCIDENT PINNED FOR OPTICAL INTERCEPT
-            </div>
-        );
-    }
-
     return (
-        <div className={cn("glass-panel rounded-xl flex flex-col overflow-hidden relative border border-cyan-500/20 bg-zinc-950/80 backdrop-blur-xl", className)}>
+        <div className={cn("glass-panel rounded-xl flex flex-col overflow-hidden relative border border-cyan-500/30 bg-zinc-950/90 backdrop-blur-xl shadow-2xl", className)}>
             {/* Header */}
             <div className="h-10 border-b border-white/10 bg-white/5 px-4 flex items-center justify-between shrink-0">
                 <div className="flex items-center gap-2">
@@ -123,8 +145,8 @@ export function LiveCameraInterceptor({ incident, className, onClose }: LiveCame
                     <span className="text-[11px] font-mono tracking-widest uppercase font-bold text-cyan-300">
                         GOD&apos;S EYE // CAMERA INTERCEPTOR
                     </span>
-                    <span className="px-1.5 py-0.2 rounded text-[9px] bg-cyan-950/80 text-cyan-400 font-mono border border-cyan-500/30">
-                        {cameras.length} FEED{cameras.length !== 1 ? "S" : ""} IN RANGE
+                    <span className="px-1.5 py-0.5 rounded text-[9px] bg-cyan-950/80 text-cyan-400 font-mono border border-cyan-500/30">
+                        {cameras.length} FEED{cameras.length !== 1 ? "S" : ""} ACTIVE
                     </span>
                 </div>
 
@@ -132,7 +154,7 @@ export function LiveCameraInterceptor({ incident, className, onClose }: LiveCame
                     {onClose && (
                         <button
                             onClick={onClose}
-                            className="text-zinc-400 hover:text-white font-mono text-xs px-2 py-0.5 rounded hover:bg-white/10"
+                            className="text-zinc-400 hover:text-white font-mono text-xs px-2 py-0.5 rounded hover:bg-white/10 cursor-pointer"
                         >
                             ✕
                         </button>
@@ -140,32 +162,118 @@ export function LiveCameraInterceptor({ incident, className, onClose }: LiveCame
                 </div>
             </div>
 
-            {/* Camera Switcher Tabs */}
-            {cameras.length > 1 && (
-                <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-white/5 bg-black/40 overflow-x-auto tactical-scrollbar shrink-0">
-                    {cameras.map((cam, idx) => (
+            {/* Filter Tabs (All / Windy / Municipal) */}
+            <div className="flex items-center justify-between px-3 py-1.5 border-b border-white/5 bg-zinc-900/60 shrink-0 text-[10px] font-mono">
+                <div className="flex items-center gap-1">
+                    <button
+                        onClick={() => setActiveFilter("ALL")}
+                        className={cn(
+                            "px-2 py-0.5 rounded font-bold transition-all cursor-pointer",
+                            activeFilter === "ALL"
+                                ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/50"
+                                : "text-zinc-400 hover:text-zinc-200"
+                        )}
+                    >
+                        ALL ({cameras.length})
+                    </button>
+                    <button
+                        onClick={() => setActiveFilter("WINDY")}
+                        className={cn(
+                            "px-2 py-0.5 rounded font-bold transition-all flex items-center gap-1 cursor-pointer",
+                            activeFilter === "WINDY"
+                                ? "bg-amber-500/20 text-amber-300 border border-amber-500/50"
+                                : "text-zinc-400 hover:text-zinc-200"
+                        )}
+                        title="Windy Open Public Webcams API"
+                    >
+                        <span>🌪️</span>
+                        <span>WINDY ({windyCount})</span>
+                    </button>
+                    <button
+                        onClick={() => setActiveFilter("MUNICIPAL")}
+                        className={cn(
+                            "px-2 py-0.5 rounded font-bold transition-all flex items-center gap-1 cursor-pointer",
+                            activeFilter === "MUNICIPAL"
+                                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/50"
+                                : "text-zinc-400 hover:text-zinc-200"
+                        )}
+                        title="Municipal Traffic & Disaster CCTV"
+                    >
+                        <span>🏢</span>
+                        <span>MUNICIPAL ({municipalCount})</span>
+                    </button>
+                </div>
+
+                {/* Windy Player Mode Toggle */}
+                {selectedCamera?.source === "WINDY" && (
+                    <div className="flex items-center bg-black/60 rounded border border-white/10 p-0.5">
                         <button
-                            key={cam.id}
-                            onClick={() => {
-                                setSelectedCamera(cam);
-                                setAnalysisResult(null);
-                            }}
+                            onClick={() => setWindyViewMode("PLAYER")}
                             className={cn(
-                                "flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-mono whitespace-nowrap transition-all border",
-                                selectedCamera?.id === cam.id
-                                    ? "bg-cyan-500/20 border-cyan-400/50 text-cyan-200 shadow-[0_0_10px_rgba(6,182,212,0.2)]"
-                                    : "bg-zinc-900/60 border-white/5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+                                "px-1.5 py-0.5 rounded text-[9px] font-mono transition-all cursor-pointer flex items-center gap-1",
+                                windyViewMode === "PLAYER"
+                                    ? "bg-amber-500/30 text-amber-300 font-bold"
+                                    : "text-zinc-400 hover:text-zinc-200"
                             )}
+                            title="Interactive Daylight/Day Timelapse Player"
                         >
-                            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-                            <span>CAM {idx + 1} ({cam.distance_km}km {cam.bearing})</span>
+                            <Play className="w-2.5 h-2.5" />
+                            <span>TIMELAPSE</span>
                         </button>
-                    ))}
+                        <button
+                            onClick={() => setWindyViewMode("SNAPSHOT")}
+                            className={cn(
+                                "px-1.5 py-0.5 rounded text-[9px] font-mono transition-all cursor-pointer flex items-center gap-1",
+                                windyViewMode === "SNAPSHOT"
+                                    ? "bg-cyan-500/30 text-cyan-300 font-bold"
+                                    : "text-zinc-400 hover:text-zinc-200"
+                            )}
+                            title="High-Resolution Realtime Snapshot"
+                        >
+                            <Camera className="w-2.5 h-2.5" />
+                            <span>SNAPSHOT</span>
+                        </button>
+                    </div>
+                )}
+            </div>
+
+            {/* Camera Switcher Horizontal Strip */}
+            {filteredCameras.length > 0 && (
+                <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-white/5 bg-black/40 overflow-x-auto tactical-scrollbar shrink-0">
+                    {filteredCameras.map((cam) => {
+                        const isSelected = selectedCamera?.id === cam.id;
+                        const isWindy = cam.source === "WINDY";
+                        return (
+                            <button
+                                key={cam.id}
+                                onClick={() => {
+                                    setSelectedCamera(cam);
+                                    setAnalysisResult(null);
+                                }}
+                                className={cn(
+                                    "flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-mono whitespace-nowrap transition-all border cursor-pointer",
+                                    isSelected
+                                        ? isWindy
+                                            ? "bg-amber-500/20 border-amber-400/60 text-amber-200 shadow-[0_0_10px_rgba(245,158,11,0.3)]"
+                                            : "bg-cyan-500/20 border-cyan-400/60 text-cyan-200 shadow-[0_0_10px_rgba(6,182,212,0.3)]"
+                                        : "bg-zinc-900/60 border-white/5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+                                )}
+                            >
+                                <span className={cn(
+                                    "w-1.5 h-1.5 rounded-full shrink-0",
+                                    isSelected ? (isWindy ? "bg-amber-400 animate-ping" : "bg-cyan-400 animate-ping") : "bg-zinc-600"
+                                )} />
+                                <span>{isWindy ? "🌪️" : "📹"}</span>
+                                <span className="font-bold">{cam.location.address?.split(",")[0] || cam.id}</span>
+                                <span className="text-zinc-500 text-[9px]">({cam.distance_km}km)</span>
+                            </button>
+                        );
+                    })}
                 </div>
             )}
 
-            {/* Video Viewport */}
-            <div className="relative flex-1 min-h-[220px] bg-black flex items-center justify-center overflow-hidden group">
+            {/* Video / Stream Viewport */}
+            <div className="relative flex-1 min-h-[260px] max-h-[360px] bg-black flex items-center justify-center overflow-hidden group">
                 {isLoading ? (
                     <div className="flex flex-col items-center gap-2 text-cyan-400 font-mono text-xs animate-pulse">
                         <RefreshCw className="w-5 h-5 animate-spin" />
@@ -173,34 +281,59 @@ export function LiveCameraInterceptor({ incident, className, onClose }: LiveCame
                     </div>
                 ) : selectedCamera ? (
                     <>
-                        {/* Video Element */}
-                        <video
-                            ref={videoRef}
-                            src={selectedCamera.stream_url}
-                            autoPlay
-                            loop
-                            muted
-                            playsInline
-                            className="w-full h-full object-cover"
-                        />
+                        {/* 1. Windy Embed Iframe Player */}
+                        {selectedCamera.source === "WINDY" && windyViewMode === "PLAYER" && selectedCamera.stream_url.startsWith("http") ? (
+                            <iframe
+                                src={selectedCamera.stream_url}
+                                title={selectedCamera.title}
+                                className="w-full h-full border-0 bg-black min-h-[260px]"
+                                allow="autoplay; fullscreen"
+                                loading="lazy"
+                            />
+                        ) : selectedCamera.stream_type === "IMAGE_SNAPSHOT" || (selectedCamera.source === "WINDY" && windyViewMode === "SNAPSHOT") ? (
+                            /* 2. Real-time Snapshot Image */
+                            <div className="relative w-full h-full flex items-center justify-center bg-black">
+                                <img
+                                    src={selectedCamera.preview_image_url || selectedCamera.stream_url}
+                                    alt={selectedCamera.title}
+                                    className="w-full h-full object-contain"
+                                />
+                            </div>
+                        ) : (
+                            /* 3. MP4 / Local Video Stream */
+                            <video
+                                ref={videoRef}
+                                src={selectedCamera.stream_url}
+                                autoPlay
+                                loop
+                                muted
+                                playsInline
+                                className="w-full h-full object-cover"
+                            />
+                        )}
 
                         {/* Tactical Scanline & Vignette Overlay */}
-                        <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(ellipse_at_center,transparent_40%,rgba(0,0,0,0.85)_100%)]" />
-                        <div className="absolute inset-0 pointer-events-none bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%)] bg-[length:100%_4px] opacity-40" />
+                        <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(ellipse_at_center,transparent_50%,rgba(0,0,0,0.7)_100%)]" />
+                        <div className="absolute inset-0 pointer-events-none bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.15)_50%)] bg-[length:100%_4px] opacity-30" />
 
                         {/* Top Left Live Badge & Timestamp */}
-                        <div className="absolute top-2.5 left-2.5 flex items-center gap-2 z-10">
-                            <span className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-red-950/80 border border-red-500/50 text-red-400 font-mono text-[9px] font-bold tracking-wider animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.4)]">
-                                <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
-                                LIVE INTERCEPT
+                        <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 z-10 pointer-events-none">
+                            <span className={cn(
+                                "flex items-center gap-1.5 px-2 py-0.5 rounded font-mono text-[9px] font-bold tracking-wider animate-pulse border shadow-md",
+                                selectedCamera.source === "WINDY"
+                                    ? "bg-amber-950/80 border-amber-500/50 text-amber-300"
+                                    : "bg-red-950/80 border-red-500/50 text-red-400"
+                            )}>
+                                <span className={cn("w-1.5 h-1.5 rounded-full", selectedCamera.source === "WINDY" ? "bg-amber-400" : "bg-red-400")} />
+                                {selectedCamera.source === "WINDY" ? "WINDY LIVE" : "LIVE INTERCEPT"}
                             </span>
-                            <span className="px-2 py-0.5 rounded bg-black/70 border border-white/10 text-zinc-300 font-mono text-[9px]">
+                            <span className="px-2 py-0.5 rounded bg-black/80 border border-white/10 text-zinc-300 font-mono text-[9px]">
                                 {selectedCamera.source}
                             </span>
                         </div>
 
                         {/* Top Right Distance & Bearing Overlay */}
-                        <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 z-10">
+                        <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 z-10 pointer-events-none">
                             <div className="px-2.5 py-0.5 rounded bg-black/80 border border-cyan-500/40 text-cyan-300 font-mono text-[10px] flex items-center gap-1 shadow-lg">
                                 <Compass className="w-3 h-3 text-cyan-400" />
                                 <span>{selectedCamera.distance_km} KM // {selectedCamera.bearing}</span>
@@ -218,8 +351,24 @@ export function LiveCameraInterceptor({ incident, className, onClose }: LiveCame
                                 </span>
                             </div>
                             <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400">
-                                <span className="text-zinc-500">OPERATOR: {selectedCamera.operator}</span>
-                                <span className="text-emerald-400 font-semibold">{selectedCamera.last_updated}</span>
+                                <span className="text-zinc-500 truncate max-w-[60%]">
+                                    OPERATOR: {selectedCamera.operator}
+                                </span>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-emerald-400 font-semibold">{selectedCamera.last_updated}</span>
+                                    {selectedCamera.source === "WINDY" && (
+                                        <a
+                                            href={`https://windy.com/webcams/${selectedCamera.id.replace("WINDY-", "")}`}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="text-amber-400 hover:text-amber-300 flex items-center gap-1 underline text-[9px]"
+                                            title="View full webcam page on Windy.com"
+                                        >
+                                            <ExternalLink className="w-2.5 h-2.5" />
+                                            <span>Windy</span>
+                                        </a>
+                                    )}
+                                </div>
                             </div>
                         </div>
                     </>
@@ -292,4 +441,5 @@ export function LiveCameraInterceptor({ incident, className, onClose }: LiveCame
         </div>
     );
 }
+
 export default LiveCameraInterceptor;

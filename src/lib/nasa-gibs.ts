@@ -80,18 +80,17 @@ export const NASA_GIBS_LAYERS: Record<string, NasaGibsLayerConfig> = {
 };
 
 /**
- * Returns the latest valid UTC date string formatted as YYYY-MM-DD for NASA GIBS.
- * Satellite passes take a few hours to process; if current UTC hour is early morning (< 04:00 UTC),
- * we query yesterday to guarantee a 100% complete global orbital mosaic.
+ * Returns the latest complete UTC date string formatted as YYYY-MM-DD for NASA GIBS.
+ * Satellite passes take up to 24-48 hours to fully composite across all longitudes.
+ * We target T - 1 (yesterday UTC) to guarantee 100% complete global satellite coverage without missing swaths.
  */
 export function getNasaGibsDateString(): string {
     const now = new Date();
-    // If before 04:00 UTC, shift to yesterday to ensure full global composite is processed
-    if (now.getUTCHours() < 4) {
-        now.setUTCDate(now.getUTCDate() - 1);
-    }
+    // Shift back 1 full UTC day to guarantee complete global orbital composite
+    now.setUTCDate(now.getUTCDate() - 1);
     const year = now.getUTCFullYear();
     const month = String(now.getUTCMonth() + 1).padStart(2, "0");
     const day = String(now.getUTCDate()).padStart(2, "0");
     return `${year}-${month}-${day}`;
 }
+
